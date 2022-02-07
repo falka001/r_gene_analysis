@@ -1,0 +1,237 @@
+---
+title: "10x Genomics"
+output: html_notebook
+---
+
+
+```{r}
+library(dplyr)
+library(anndata)
+library(reticulate)
+Sys.setenv(RETICULATE_PYTHON = #path to python )
+library(ggplot2)
+library(tools)
+library(stats)
+library(sjmisc)
+library(stringr)
+library(parallel)
+library(doParallel)
+library(foreach)
+```
+```{r}
+detectCores(logical = FALSE)
+ls("package:parallel")
+ls("package:doParallel")
+ls("package:foreach")
+```
+
+
+# Determine how many genes are expressed in each cell
+
+analysis <- function(filename) {
+  adata <- anndata::read_loom(filename)
+  adata
+  gpc <- data.frame(CellID = adata$obs, num_genes = as.integer(NA), library_size = as.integer(NA))     # create a new dataframe to hold number of genes in each cell
+  for (i in 1:length(adata$X[,1])) {
+    genes<-adata$X[i,]
+    gpc[i, "num_genes"] <- length(genes[genes > 0])
+    gpc[i, "library_size"] <- sum(genes)
+  }
+  temp <- c(file_path_sans_ext(filename), "csv")
+  savfile <- paste(temp, collapse = ".")
+  write.table(gpc, file=savfile)
+}
+
+
+
+# Plotting results for number of read genes per cell
+
+denplot <- function(gdata, numgenes, libsize, filename) {
+  temp <- c(file_path_sans_ext(filename), "_reads", ".png")
+  greads <- paste(temp, collapse = "")
+  png(filename = greads, width=600, height=350, type = "cairo")
+  hist(numgenes,col = "orange", border = "black", probability = TRUE,
+     xlab = "num_genes", main = "Distribution of Genes Expressed Per Cell", xlim = c(0,max(numgenes)+2000), breaks = 100)
+  lines(density(numgenes), lwd = 3, col = "black")
+  dev.off()
+  
+  temp <- c(file_path_sans_ext(filename), "_libsize", ".png")
+  glibsize <- paste(temp, collapse = "")
+  png(filename = glibsize, width=600, height=350, type = "cairo")
+  hist(libsize,col = "orange", border = "black", probability = TRUE,
+     xlab = "library size", main = "Distribution of Library Size Per Cell", xlim = c(0,max(libsize)+10000), breaks = 116)
+  lines(density(libsize), lwd = 3, col = "black")
+  dev.off()
+  
+}
+
+
+
+# Finding Pearson Correlation Coefficient and plotting a scatter plot two show relationship between number of genes and library size
+
+scatterpcc <- function(dataframe, numgenes, libsize, filename) {
+  temp <- c(file_path_sans_ext(filename), "_pcc_scat", ".png")
+  filename <- paste(temp, collapse = "")
+  png(filename = filename, width=600, height=350, type = "cairo")
+  r <- cor(numgenes, libsize, use = "everything", method = "pearson")   # Find PCC
+  r <- format(round(r, 4), nsmall = 4)    # Format PCC to 4 decimal places
+  plot(numgenes, libsize, 
+     main = "Number of Genes vs. Library Size", xlab = "Number of Genes",
+     ylab = "Library Size", pch = 19, frame.plot = TRUE, col = "orange",)   # Scatter Plot
+  temp <- c("r = ", r)
+  pcc <- paste(temp, collapse = "")
+  legend("topleft", c("Pearson Correlation", "Coefficient", pcc))     # Add Legend to Plot
+  abline(lm(libsize ~ numgenes, data = dataframe), col = "black")   # Add Linear Regression to scatter plot
+  dev.off()
+}
+
+```{r}
+# Finding correlations between each TF and TG for each loom file, and saving results to matrix
+
+tftg_corr <- function(set_list ,genes, trans_facs, settings, index) {
+      # Matrix of Transcription Factors (TF/s) as variables and Targeted Genes (TG/s) as observations
+  pcorr <- matrix(0, nrow = nrow(genes), ncol = trans_facs$n_vars)
+  colnames(pcorr) <- trans_facs$var_names
+  rownames(pcorr) <- genes$V4
+  head(pcorr)
+
+# --------------------------------------------------------------------------------------
+        # This code is slow, it takes for 4-5 hours to move to the next iterator for loop B because loop C has around 50,000 iterations and loop B is around 250 iterations
+  
+  for (a in 1:length(set_list)) {
+    loom <- read_loom(set_list[[a]])
+    print("we read the first file")
+    maxx <- trans_facs$n_vars
+    for(b in 1:maxx) {                                  # LOOP B
+      print("we are looping through the TFs")
+      TF_name <- trans_facs$var_names[b]                # saving TF name
+      for (i in 1:loom$n_vars) {                        # LOOP C
+        print("we are looping through the TGs")
+        k <- loom$var_names[i]                          # saving TG  name
+        if (k %in% genes$V4 == TRUE && k != TF_name) {            # Verifying if TG exists in bed file and TG != TF
+          gexp <- loom$X[,k]
+          TF_exp <- loom$X[,TF_name]
+          if (length(gexp[gexp>0]) > 3) {             # Pearson Correlation (PC) is only calculated if TG is read in more than 3 cells
+            print("performing correlation")
+            r <- cor(TF_exp, gexp, use = "everything", method = "pearson")
+            print(r)
+          }
+          else {
+            r <- "NULL"               # If TG is not expressed in at least 3 cells          
+            print(r)
+          }
+        }
+        else {
+          r <- "NULL"              # If they are the same gene 
+          print(r)
+        }
+        pcorr[k, TF_name] <- r
+        print("getting next gene")
+      }
+      print("getting next TF")
+    }
+    print("getting next loom")
+  }
+  colnames(corr) <- trans_facs$var_names
+  rownames(corr) <- genes$V4
+  if (length(settings) != 0) {
+    temp <- c("correlations", settings[a])
+    temp <- paste(temp, collapse = "_")
+    temp <- c(temp, ".csv")
+    savfile <- paste(temp, collapse = "")
+  }
+  write.csv(pcorr, file = savfile)
+}
+```
+
+
+
+
+files <- list.files(#path to file , pattern = "*.loom")
+files
+for (i in 1:length(files)) {
+  bool <- str_contains(files[i], "vsmc", ignore.case = TRUE)
+  if (bool == TRUE) {
+    analysis(files[i])
+  }
+}
+```
+
+
+files <- list.files(#path to file, pattern = "*.csv")
+for (i in 1:length(files)) {
+  bool <- str_contains(files[i], "vsmc", ignore.case = TRUE)
+  if (bool == TRUE) {
+    gpc <- read.table(files[i])
+    denplot(gpc, gpc$num_genes, gpc$library_size, files[i])
+    scatterpcc(gpc, gpc$num_genes, gpc$library_size, files[i])
+  }
+}
+```
+
+```{r}
+files <- list.files(#path to file , pattern = "*.loom")
+genes_bed <- read.table(#path to file , header = FALSE)
+TFs <- read_csv(#path to file)
+
+# Settings to be analyzed saved in a list must be insert as 
+    #genes type (Wild or KO), reading week, HFD (if exist, if not then do not include), all separated by _
+sets <- list("wt_3w", "ko_3w", "wt_6w", "ko_6w", "wt_1w_HFD", "wt_12w_HFD", "ko_12w_HFD")
+
+sp_sets <- list()
+k = 1
+for ( i in 1:length(sets)) {
+  for ( j in 1:length(files)) {
+    bool <- str_contains(files[j], sets[i], ignore.case = TRUE)
+    if (bool==TRUE) {
+      vsmc <- str_contains(files[j], "vsmc", ignore.case = TRUE)
+      if (vsmc == FALSE) {
+        sp_sets[k] <- files[j]
+        if (any(sp_sets == "NULL")) {
+          sp_sets <- sp_sets[-which(sapply(sp_sets, is.null))]                     # removes null values from list
+        }
+      }
+    }
+    k = k+1
+  }
+}
+print("--------------------")
+sp_sets
+```
+
+```{r}
+# Scratch work to enhance speed of code (Not Complete)
+
+cluster <- parallel::makeCluster((detectCores()-20))
+  doParallel::registerDoParallel(cluster)
+
+  loom <- read_loom(sp_sets[[1]])
+  print("we read the first file")
+  maxx <- TFs$n_vars
+  temp <- list()
+    foreach(j=100:maxx, .combine = 'cbind') %dopar% {
+      TF_name <- TFs$var_names[j]                # saving TF name
+      for (i in 1:50) {
+        k <- loom$var_names[i]                   # saving TG  name && k != TF_name
+        #k <- genes_bed$V4[i]
+        #if (k %in% genes_bed$V4 == TRUE) {            # Verifying if TG exists in bed file and TG != TF
+        gexp <- loom$X[,k]
+        TF_exp <- loom$X[,TF_name]
+        #temp[i] <- 3 * i
+        gexp <- gexp[ ,gexp[,1]>0]            # Pearson Correlation (PC) is only calculated if TG is read in more than 3 cells
+        #r <- cor(TF_exp, gexp, use = "everything", method = "pearson")
+        temp[i] <- gexp[5]
+      }
+          #else {
+            #r <- 2               # If TG is not expressed in at least 3 cells
+            #test[i] <- 3
+          #}
+      temp
+    }
+        #else {
+          #r <- 2              # If they are the same gene
+          #test[i] <- 3
+        #}
+      #}
+    #j <- test
+```
